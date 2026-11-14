@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>離線單據掃描記賬 Receipt Scanner HK</title>
+<meta name="description" content="影張單據相,自動認出商戶、日期同總數,記低開支,資料唔離開你部電話。">
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; background: #ffffff; color: #111111;
+  font-family: -apple-system, "PingFang HK", "Microsoft JhengHei", sans-serif;
+  font-size: 16px; line-height: 1.5; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 22px; margin: 8px 0 4px; }
+.sub { color: #555; margin: 0 0 12px; }
+button { font-size: 16px; padding: 10px 16px; border-radius: 8px;
+  border: 1px solid #111; background: #111; color: #fff; cursor: pointer;
+  margin: 8px 6px 8px 0; }
+button.ghost { background: #fff; color: #111; }
+button:disabled { opacity: .5; }
+#preview { max-width: 100%; border: 1px solid #ddd; border-radius: 8px;
+  display: none; margin: 12px 0; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 8px 0; }
+.card label { display: block; font-size: 13px; color: #555; }
+.card input { width: 100%; font-size: 16px; padding: 8px; margin: 2px 0 8px;
+  border: 1px solid #999; border-radius: 6px; }
+.item-row { display: flex; gap: 6px; margin-bottom: 6px; }
+.item-row input { margin: 0; }
+.item-row .item-name { flex: 1; }
+.item-row .item-amount { width: 96px; }
+.item-row button { padding: 8px 10px; margin: 0; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td { padding: 8px; border-bottom: 1px solid #ddd; text-align: left; }
+td.num { text-align: right; white-space: nowrap; }
+.note { background: #fff8e1; border: 1px solid #ffe082; border-radius: 8px;
+  padding: 10px 12px; font-size: 14px; margin: 16px 0; }
+.foot { color: #777; font-size: 13px; margin: 24px 0; }
+#status { color: #555; margin: 8px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>離線單據掃描記賬 <span style="font-size:15px;color:#555">Receipt Scanner HK</span></h1>
+  <p class="sub">影張單據相,自動認出商戶、日期同總數,記低開支。相片同資料唔會上傳,全部留喺你部機。</p>
+
+  <input type="file" id="file" accept="image/*" style="font-size:16px">
+  <img id="preview" alt="單據預覽">
+  <p id="status"></p>
+  <button id="scan" disabled>開始辨識 (OCR)</button>
+  <button id="manual" class="ghost">人手輸入 (唔用 OCR)</button>
+  <button id="sample" class="ghost">試用範例單據</button>
+  <br><textarea id="paste" placeholder="或者直接貼上單據文字 (由 OCR app 複製返嚟、或者自己打),再㩒「解析貼上的文字」— 唔使影相都記到賬。" style="width:100%;min-height:70px;font-size:15px;padding:8px;border:1px solid #999;border-radius:6px;margin-top:8px"></textarea>
+  <button id="parsePaste" class="ghost">解析貼上的文字</button>
+  <button id="export" class="ghost">匯出 CSV</button>
+  <button id="clear" class="ghost">清空記錄</button>
+  <button id="undo" class="ghost" style="display:none">復原刪除</button>
+
+  <div id="form" style="display:none">
+    <h2>辨識結果 — 請核對</h2>
+    <div class="card">
+      <label>商戶 Merchant</label><input id="f-merchant">
+      <label>日期 Date</label><input id="f-date" placeholder="YYYY-MM-DD">
+      <label>總數 Total (HK$)</label><input id="f-total" inputmode="decimal">
+      <label>類別 Category (自動估算,可改)</label><select id="f-category" style="width:100%;font-size:16px;padding:8px;border:1px solid #999;border-radius:6px"><option>超市日用品</option><option>飲食</option><option>藥妝健康</option><option>交通</option><option>服裝</option><option>家居</option><option>文具書籍</option><option>娛樂</option><option>其他</option></select>
+      <label>付款方式 Payment (自動辨識)</label><input id="f-payment" readonly>
+      <label>項目 Items (可改,可刪,可加)</label>
+      <div id="items"></div>
+      <p id="itemCheck" class="note" style="display:none"></p>
+      <button id="add-item" class="ghost" type="button">+ 加一項</button>
+      <button id="save">儲存呢筆</button>
+    </div>
+    <details><summary>OCR 原文 (檢查用)</summary>
+      <pre id="ocr" style="white-space:pre-wrap;font-size:13px"></pre>
+    </details>
+  </div>
+
+  <h2>我的記錄 <span id="sum"></span></h2>
+  <table><thead><tr><th>日期</th><th>商戶</th><th style="text-align:right">總數</th><th></th></tr></thead>
+  <tbody id="rows"></tbody></table>
+
+  <h2>每月統計 Monthly summary</h2>
+  <div id="summary"><p class="note">未有記錄。</p></div>
+
+  <div class="note">已完成:單據解析 (<code>parser.js</code>)、Tesseract.js OCR、項目逐項抽取、類別自動分類、每月統計同類別 breakdown、範例單據同貼文字解析,全部喺本機做。
+  第一次辨識要上網下載語言包,之後辨識喺本機進行。所有資料只存喺呢部機嘅 localStorage,唔會上傳。支援格式:百佳/惠康/7-Eleven/麥當勞/一田/日本城/實惠/豐澤/百老匯/大家樂/大快活/譚仔等連鎖店、中文日期 (2026年11月9日,無年份亦得)、2 位年份、數量行 (x2)、分行金額、整數金額、八達通/Visa/現金等付款方式。儲存前會檢查日期格式同埋唔畀存空白記錄;項目加埋同總數唔同會即時提示;每筆記錄可以逐筆刪除,刪錯咗可以㩒「復原刪除」拎返 (今次開住呢頁先得,閂咗頁就冇得復原);同商戶、日期、總數完全一樣嘅記錄儲存前會彈出提醒,防止重複儲存;匯出 CSV 有 BOM,Excel 開中文唔會亂碼。第一次辨識要下載語言包 (約 15 MB,一次就好),之後語言包留喺部機 (IndexedDB);用 https 開呢頁 (例如 GitHub Pages) 嘅話,Service Worker (sw.js) 會將辨識引擎同語言包快取喺部機,之後離線都用到 OCR;想完全自托管語言包可以睇 vendor/README.md。</div>
+  <p class="foot">Receipt Scanner HK — 開放原始碼 (MIT)。</p>
+</div>
+<script>
+/* parser.js — inlined copy so this page works as a single file.
+ * Source of truth is parser.js in the same folder; keep both in sync
+ * (paste the whole of parser.js here when it changes). */
+/* HK receipt parser — pure functions, no dependencies, ES5.
+ * Used by index.html (browser) and tests/test_parser.js (node).
+ * Input: raw OCR text from Tesseract.js (chi_tra+eng).
+ * Output: { merchant, date, total, subtotal, currency, payment, change,
+ *           category, lines, confidence }
+ * parseLineItems(lines) -> [{ name, amount }] for item lines.
+ * guessCategory(merchant, items) -> one of the spending categories.
+ * Never throws on messy OCR text — returns nulls and lets the user correct.
+ */
+(function (root) {
+  "use strict";
+
+  var TOTAL_WORDS = ["total", "合共", "總數", "總計", "應付", "應收",
+    "amount due", "balance due", "grand total", "net total",
+    "實付", "總額", "合計", "收費", "應付金額", "總金額", "金額",
+    "payable", "amount payable", "total amount"];
+  var IGNORE_LINES = /^(thank|多謝|歡迎|welcome|tel|電話|地址|address|單號|receipt|收據|invoice|發票|編號|no\.|編)/i;
+
+  /* Well-known Hong Kong chains: OCR often mangles the name, so match a
+     substring and return the canonical name. Checked before the generic
+     first-plausible-line rule, over the first few lines only. */
+  var KNOWN_MERCHANTS = [
+    ["PARKNSHOP", "PARKnSHOP 百佳"], ["百佳", "PARKnSHOP 百佳"],
+    ["WELLCOME", "Wellcome 惠康"], ["惠康", "Wellcome 惠康"],
+    ["7-ELEVEN", "7-Eleven"], ["7-11", "7-Eleven"],
+    ["CIRCLE K", "Circle K"], ["OK便利店", "Circle K"],
+    ["MCDONALD", "McDonald's"], ["麥當勞", "McDonald's"],
+    ["KFC", "KFC"], ["肯德基", "KFC"],
+    ["MANNINGS", "Mannings 萬寧"], ["萬寧", "Mannings 萬寧"],
+    ["WATSONS", "Watsons 屈臣氏"], ["屈臣氏", "Watsons 屈臣氏"],
+    ["AEON", "AEON"], ["永旺", "AEON"],
+    ["DON DON DONKI", "Don Don Donki"], ["DONKI", "Don Don Donki"],
+    ["SASA", "Sasa 莎莎"], ["莎莎", "Sasa 莎莎"],
+    ["HKTV", "HKTVmall"], ["DECATHLON", "Decathlon"], ["迪卡儂", "Decathlon"],
+    ["IKEA", "IKEA"], ["宜家", "IKEA"],
+    ["DAISO", "Daiso"], ["大創", "Daiso"],
+    ["759", "759 阿信屋"], ["阿信屋", "759 阿信屋"],
+    ["STARBUCKS", "Starbucks"], ["星巴克", "Starbucks"],
+    ["SUSHIRO", "Sushiro 壽司郎"], ["壽司郎", "Sushiro 壽司郎"],
+    ["GENKI", "Genki Sushi 元気寿司"], ["元気寿司", "Genki Sushi 元気寿司"],
+    ["UNIQLO", "Uniqlo"], ["優衣庫", "Uniqlo"],
+    ["MUJI", "Muji 無印良品"], ["無印良品", "Muji 無印良品"],
+    ["YATA", "YATA 一田"], ["一田", "YATA 一田"],
+    ["JAPAN HOME", "Japan Home Centre 日本城"], ["日本城", "Japan Home Centre 日本城"],
+    ["PRICERITE", "Pricerite 實惠"], ["實惠", "Pricerite 實惠"],
+    ["FORTRESS", "Fortress 豐澤"], ["豐澤", "Fortress 豐澤"],
+    ["BROADWAY", "Broadway 百老匯"], ["百老匯", "Broadway 百老匯"],
+    ["PIZZA HUT", "Pizza Hut 必勝客"], ["必勝客", "Pizza Hut 必勝客"],
+    ["YOSHINOYA", "Yoshinoya 吉野家"], ["吉野家", "Yoshinoya 吉野家"],
+    ["CAFE DE CORAL", "Café de Coral 大家樂"], ["大家樂", "Café de Coral 大家樂"],
+    ["FAIRWOOD", "Fairwood 大快活"], ["大快活", "Fairwood 大快活"],
+    ["TAMJAI", "TamJai 譚仔"], ["TAM JAI", "TamJai 譚仔"], ["譚仔", "TamJai 譚仔"],
+    ["SAIZERIYA", "Saizeriya 薩莉亞"], ["薩莉亞", "Saizeriya 薩莉亞"]
+  ];
+
+  var PAYMENT_WORDS = [
+    ["octopus", "Octopus 八達通"], ["八達通", "Octopus 八達通"],
+    ["visa", "Visa"], ["mastercard", "Mastercard"], ["master", "Mastercard"],
+    ["cash", "Cash 現金"], ["現金", "Cash 現金"],
+    ["fps", "FPS 轉數快"], ["轉數快", "FPS 轉數快"],
+    ["alipay", "Alipay 支付寶"], ["支付寶", "Alipay 支付寶"],
+    ["wechat", "WeChat Pay 微信支付"], ["微信", "WeChat Pay 微信支付"],
+    ["payme", "PayMe"], ["apple pay", "Apple Pay"],
+    ["credit card", "Credit card 信用卡"], ["信用卡", "Credit card 信用卡"],
+    ["eps", "EPS 易辦事"]
+  ];
+
+  /* Category keywords: checked against merchant name first, then item names. */
+  var CATEGORY_RULES = [
+    ["超市日用品", ["百佳", "惠康", "parknshop", "wellcome", "759", "阿信屋", "aeon", "donki", "超市", "market", "supermarket"]],
+    ["飲食", ["茶餐廳", "餐廳", "麥當勞", "mcdonald", "kfc", "starbucks", "星巴克", "壽司", "sushi", "飯", "麵", "咖啡", "coffee", "茶", "pizza", "cafe", "餐", "食"]],
+    ["藥妝健康", ["萬寧", "mannings", "屈臣氏", "watsons", "莎莎", "sasa", "藥房", "pharmacy", "drug"]],
+    ["交通", ["mtr", "港鐵", "巴士", "bus", "的士", "taxi", "八達通", "octopus", "加油", "petrol"]],
+    ["服裝", ["uniqlo", "優衣庫", "muji", "無印", "衣服", "clothing", "鞋", "shoe"]],
+    ["家居", ["ikea", "宜家", "decathlon", "迪卡儂", "家居", "家品"]],
+    ["文具書籍", ["書", "book", "文具", "stationery"]],
+    ["娛樂", ["電影", "cinema", "movie", "遊戲", "game", "唱k", "karaoke"]]
+  ];
+
+  function cleanLines(text) {
+    return String(text || "").split(/\r?\n/)
+      .map(function (l) { return l.replace(/\s+/g, " ").trim(); })
+      .filter(function (l) { return l.length > 0; });
+  }
+
+  function pad(s) { s = String(s); return s.length === 1 ? "0" + s : s; }
+
+  function validDate(y, m, d) {
+    y = parseInt(y, 10); m = parseInt(m, 10); d = parseInt(d, 10);
+    if (isNaN(y) || isNaN(m) || isNaN(d)) { return null; }
+    if (y < 100) { y += 2000; }
+    if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) { return null; }
+    return y + "-" + pad(m) + "-" + pad(d);
+  }
+
+  function findDate(lines) {
+    // Order matters: ISO first — otherwise the DD/MM pattern would match
+    // a substring of an ISO date ("26-11-09" inside "2026-11-09").
+    var patterns = [
+      // 2026年11月9日 / 2026年11月9號
+      /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})[日號]/,
+      // 2026-11-09, 2026/11/09
+      /(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/,
+      // 09/11/2026, 9-11-2026, 09.11.2026, 09/11/26 (HK order: DD/MM/YYYY)
+      /(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/,
+      // 9 Nov 2026, 09 NOV 2026
+      /(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})/i
+    ];
+    for (var i = 0; i < lines.length; i++) {
+      for (var p = 0; p < patterns.length; p++) {
+        var m = lines[i].match(patterns[p]);
+        if (!m) continue;
+        if (p === 0) {
+          var c = validDate(m[1], m[2], m[3]);
+          if (c) { return c; }
+        } else if (p === 1) {
+          var iso = validDate(m[1], m[2], m[3]);
+          if (iso) { return iso; }
+        } else if (p === 3) {
+          var months = { jan: "01", feb: "02", mar: "03", apr: "04",
+            may: "05", jun: "06", jul: "07", aug: "08", sep: "09",
+            oct: "10", nov: "11", dec: "12" };
+          var mon = months[m[2].toLowerCase().slice(0, 3)];
+          if (mon) {
+            var named = validDate(m[3], mon, m[1]);
+            if (named) { return named; }
+          }
+        } else {
+          // DD/MM/YYYY or DD/MM/YY — only accept plausible HK dates
+          var dd = validDate(m[3], m[2], m[1]);
+          if (dd) { return dd; }
+        }
+      }
+    }
+    // Second pass: year-less "11月9日" (some small-shop receipts omit the
+    // year) — only if no full date was found anywhere above; assume the
+    // current year. Kept last so a full date on any line always wins.
+    for (var j = 0; j < lines.length; j++) {
+      var ym = lines[j].match(/(\d{1,2})月\s*(\d{1,2})[日號]/);
+      if (ym) {
+        var yd = validDate(new Date().getFullYear(), ym[1], ym[2]);
+        if (yd) { return yd; }
+      }
+    }
+    return null;
+  }
+
+  /* Amounts in a line: decimals ($8.50, 8.50, $1,234.56), $-prefixed
+     integers ($38), or integers with an HKD suffix (38 HKD). Bare integers
+     are NOT amounts — otherwise dates like 09/11/2026 would read as money. */
+  function amountsIn(line) {
+    var out = [];
+    var re = /(?:HK\$|\$)\s*(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{2}))?|(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\b|(\d{1,3}(?:,\d{3})*|\d+)\s*(?:HKD|HKS|HK\$)/g;
+    var m;
+    while ((m = re.exec(line)) !== null) {
+      var whole, frac;
+      if (m[1] !== undefined) { whole = m[1]; frac = m[2]; }
+      else if (m[3] !== undefined) { whole = m[3]; frac = m[4]; }
+      else { whole = m[5]; frac = undefined; }
+      out.push(parseFloat(whole.replace(/,/g, "") + "." + (frac || "00")));
+    }
+    return out;
+  }
+
+  function findTotal(lines) {
+    var best = null;
+    for (var i = 0; i < lines.length; i++) {
+      var low = lines[i].toLowerCase();
+      var isTotalLine = false;
+      for (var w = 0; w < TOTAL_WORDS.length; w++) {
+        if (low.indexOf(TOTAL_WORDS[w].toLowerCase()) !== -1) { isTotalLine = true; break; }
+      }
+      var amounts = amountsIn(lines[i]);
+      if (isTotalLine && amounts.length) {
+        // Total is usually the last amount on a total line.
+        best = amounts[amounts.length - 1];
+      }
+    }
+    if (best !== null) return best;
+    // Fallback: largest amount anywhere (often the total on short receipts),
+    // skipping date-like lines so 2026 is never read as a price.
+    var max = null;
+    for (var j = 0; j < lines.length; j++) {
+      if (DATE_LIKE.test(lines[j])) continue;
+      var a = amountsIn(lines[j]);
+      for (var k = 0; k < a.length; k++) {
+        if (max === null || a[k] > max) max = a[k];
+      }
+    }
+    return max;
+  }
+
+  function findSubtotal(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      var low = lines[i].toLowerCase();
+      if (low.indexOf("小計") !== -1 || low.indexOf("subtotal") !== -1) {
+        var a = amountsIn(lines[i]);
+        if (a.length) { return a[a.length - 1]; }
+      }
+    }
+    return null;
+  }
+
+  function findPayment(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      var low = lines[i].toLowerCase();
+      for (var w = 0; w < PAYMENT_WORDS.length; w++) {
+        if (low.indexOf(PAYMENT_WORDS[w][0].toLowerCase()) !== -1) {
+          return PAYMENT_WORDS[w][1];
+        }
+      }
+    }
+    return null;
+  }
+
+  function findChange(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      var low = lines[i].toLowerCase();
+      if (low.indexOf("找續") !== -1 || low.indexOf("找零") !== -1 ||
+          low.indexOf("change") !== -1) {
+        var a = amountsIn(lines[i]);
+        if (a.length) { return a[a.length - 1]; }
+      }
+    }
+    return null;
+  }
+
+  var DATE_LIKE = /(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})|(\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2})|(\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})|(\d{4}年\s*\d{1,2}月\s*\d{1,2}[日號])/i;
+
+  function findMerchant(lines) {
+    var i, k;
+    // Known chains first (first 6 lines only — the header).
+    var head = Math.min(6, lines.length);
+    for (i = 0; i < head; i++) {
+      var up = lines[i].toUpperCase();
+      var low = lines[i].toLowerCase();
+      for (k = 0; k < KNOWN_MERCHANTS.length; k++) {
+        var key = KNOWN_MERCHANTS[k][0];
+        var hay = /[A-Z]/.test(key.charAt(0)) ? up : low;
+        var needle = /[A-Z]/.test(key.charAt(0)) ? key : key.toLowerCase();
+        if (hay.indexOf(needle) !== -1) { return KNOWN_MERCHANTS[k][1]; }
+      }
+    }
+    for (i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (IGNORE_LINES.test(l)) continue;
+      if (DATE_LIKE.test(l)) continue;
+      if (/\d/.test(l) && amountsIn(l).length) continue; // price line
+      if (l.length < 2 || l.length > 40) continue;
+      return l;
+    }
+    return null;
+  }
+
+  // Lines that are never items: totals, subtotals, payment, change, thanks.
+  var NON_ITEM_WORDS = ["total", "合共", "總數", "總計", "應付", "應收",
+    "amount due", "balance due", "grand total", "net total",
+    "實付", "總額", "合計", "收費",
+    "小計", "subtotal", "折扣", "discount", "稅", "tax",
+    "找續", "找零", "change", "現金", "cash", "八達通", "octopus",
+    "visa", "mastercard", "master", "fps", "轉數快", "信用卡",
+    "付款", "payment", "餘額", "balance", "多謝", "thank", "歡迎",
+    "welcome", "小費", "tip", "服務費", "service charge"];
+  var AMOUNT_ONLY = /^(?:HK\$|\$)?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:HKD|HKS|HK\$)?\s*$/i;
+
+  function isNonItem(line) {
+    var low = line.toLowerCase();
+    for (var w = 0; w < NON_ITEM_WORDS.length; w++) {
+      if (low.indexOf(NON_ITEM_WORDS[w].toLowerCase()) !== -1) { return true; }
+    }
+    if (IGNORE_LINES.test(line)) { return true; }
+    if (DATE_LIKE.test(line)) { return true; }
+    return false;
+  }
+
+  // Extract item lines: name + amount at the end of the line, HK style,
+  // e.g. "維他奶 250ml $8.50", "白米 5kg $72.80", "Fresh Milk 1L $32.50".
+  // Also handles "維他奶 x2 $8.50" (quantity x unit price) and split lines
+  // where the amount sits on the next line. Accepts an array of lines
+  // (from parseReceipt) or a raw text string. Lines without a trailing
+  // amount are ignored; total / subtotal / payment lines are never items.
+  function parseLineItems(lines) {
+    var ls = lines;
+    if (typeof ls === "string") ls = cleanLines(ls);
+    if (!ls || !ls.length) return [];
+    var out = [];
+    for (var i = 0; i < ls.length; i++) {
+      var line = String(ls[i]).replace(/\s+/g, " ").trim();
+      if (!line || isNonItem(line)) continue;
+      // Does this line already end in an amount? Only pair with the next
+      // line when it does not — otherwise a following amount-only line
+      // (e.g. a subtotal printed on its own line) would steal the item.
+      var hasTrailing = /(?:HK\$|\$)?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:HKD|HKS|HK\$)?\s*$/.test(line) &&
+        /[\d$]/.test(line.slice(-8));
+      // Split-line format: name on this line, amount alone on the next.
+      if (!hasTrailing && i + 1 < ls.length) {
+        var next = String(ls[i + 1]).replace(/\s+/g, " ").trim();
+        if (AMOUNT_ONLY.test(next) && !/^\d{4}$/.test(next.replace(/[^0-9]/g, ""))) {
+          var na = amountsIn(next);
+          if (na.length && line.length >= 2 && !/^\d+$/.test(line)) {
+            out.push({ name: line, amount: na[na.length - 1] });
+            i++;
+            continue;
+          }
+        }
+      }
+      // Quantity form: "維他奶 x2 $8.50" or "維他奶 2x $8.50"
+      var qm = line.match(/^(.*?)\s*(?:[xX×]\s*(\d+)|(\d+)\s*[xX×])\s*(?:HK\$|\$)?\s*(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{2}))?\s*(?:HKD|HKS|HK\$)?\s*$/);
+      if (qm) {
+        var qty = parseInt(qm[2] || qm[3], 10);
+        var unit = parseFloat(qm[4].replace(/,/g, "") + "." + (qm[5] || "00"));
+        var qname = qm[1].replace(/[\s\-–—:：]+$/, "").trim();
+        if (qname.length >= 2 && qty > 0) {
+          out.push({ name: qname + " x" + qty, amount: Math.round(unit * qty * 100) / 100 });
+          continue;
+        }
+      }
+      // Amount must sit at the end of the line: "$8.50", "8.50",
+      // "$1,234.56", or an integer "$38" / "38 HKD".
+      var m = line.match(/(?:HK\$|\$)?\s*(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{2}))?\s*(?:HKD|HKS|HK\$)?\s*$/);
+      if (!m) continue;
+      var amount = parseFloat(m[1].replace(/,/g, "") + "." + (m[2] || "00"));
+      var name = line.slice(0, m.index).replace(/\$+$/, "").replace(/[\s\-–—:：]+$/, "").trim();
+      if (name.length < 2) continue;
+      if (/^\d+$/.test(name)) continue;
+      // A bare trailing integer with no $ and no HKD is only an amount if
+      // the line had a $ earlier or the amount looks like a price; guard
+      // against "單號 12345"-style lines that slipped past IGNORE_LINES.
+      if (!m[2] && line.indexOf("$") === -1 && !/HKD|HKS|HK\$/i.test(line)) {
+        continue;
+      }
+      out.push({ name: name, amount: amount });
+    }
+    return out;
+  }
+
+  function guessCategory(merchant, items) {
+    var hay = ((merchant || "") + " " + ((items || []).map(function (it) { return it.name; }).join(" "))).toLowerCase();
+    for (var i = 0; i < CATEGORY_RULES.length; i++) {
+      var keys = CATEGORY_RULES[i][1];
+      for (var k = 0; k < keys.length; k++) {
+        if (hay.indexOf(keys[k].toLowerCase()) !== -1) { return CATEGORY_RULES[i][0]; }
+      }
+    }
+    return "其他";
+  }
+
+  /* Sum of item amounts (null amounts ignored), rounded to cents. Used
+     by the page to warn when the items do not add up to the total. */
+  function sumItems(items) {
+    var s = 0;
+    (items || []).forEach(function (it) {
+      if (it && typeof it.amount === "number" && !isNaN(it.amount)) { s += it.amount; }
+    });
+    return Math.round(s * 100) / 100;
+  }
+
+  function parseReceipt(text) {
+    var lines = cleanLines(text);
+    if (!lines.length) {
+      return { merchant: null, date: null, total: null, subtotal: null,
+               currency: "HKD", payment: null, change: null,
+               category: "其他", lines: [], confidence: 0 };
+    }
+    var date = findDate(lines);
+    var total = findTotal(lines);
+    var merchant = findMerchant(lines);
+    var items = parseLineItems(lines);
+    var hits = (merchant ? 1 : 0) + (date ? 1 : 0) + (total !== null ? 1 : 0);
+    return { merchant: merchant, date: date, total: total,
+             subtotal: findSubtotal(lines),
+             currency: "HKD", payment: findPayment(lines),
+             change: findChange(lines),
+             category: guessCategory(merchant, items),
+             lines: lines, confidence: hits / 3 };
+  }
+
+  /* ---- records: duplicate check + undo (pure, no DOM) ----
+   * The page keeps records in localStorage. These helpers are pure so
+   * they can be tested under node; the page uses them for the
+   * "did I already save this?" warning and the undo-delete button.
+   *
+   * A record is a duplicate of an existing one only when merchant, date
+   * AND total all match. A missing date or total never counts as a match
+   * — two hand-entered records with no date are not the same receipt.
+   * Amounts compare within one cent (OCR / rounding noise). */
+  function sameText(a, b) {
+    return String(a || "").trim().toLowerCase() ===
+      String(b || "").trim().toLowerCase();
+  }
+  function isDuplicateRecord(records, rec) {
+    if (!rec || !records || !records.length) { return false; }
+    if (!rec.date || rec.total === null || rec.total === undefined ||
+        isNaN(rec.total)) { return false; }
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      if (!r || !r.date || r.total === null || r.total === undefined ||
+          isNaN(r.total)) { continue; }
+      if (sameText(r.merchant, rec.merchant) && r.date === rec.date &&
+          Math.abs(r.total - rec.total) < 0.01) { return true; }
+    }
+    return false;
+  }
+
+  /* Deep copy of a records array (records + their item lines), so an
+   * undo snapshot is not affected by later edits. */
+  function snapshotRecords(records) {
+    return (records || []).map(function (r) {
+      var copy = {};
+      var k;
+      for (k in r) {
+        if (k === "items" && r.items) {
+          copy.items = r.items.map(function (it) {
+            return { name: it.name, amount: it.amount };
+          });
+        } else {
+          copy[k] = r[k];
+        }
+      }
+      return copy;
+    });
+  }
+
+  /* Undo stack: an array of snapshots, newest last, capped at 20 so it
+   * cannot grow without bound. Push BEFORE a destructive change
+   * (delete one record, clear all); pop to restore. The stack lives in
+   * memory only — closing the page loses it, which the page says. */
+  var UNDO_MAX = 20;
+  function pushUndo(stack, records) {
+    var s = (stack || []).slice();
+    s.push(snapshotRecords(records));
+    while (s.length > UNDO_MAX) { s.shift(); }
+    return s;
+  }
+  function popUndo(stack) {
+    if (!stack || !stack.length) { return null; }
+    var s = stack.slice();
+    var records = s.pop();
+    return { stack: s, records: records };
+  }
+
+  var api = { parseReceipt: parseReceipt, parseLineItems: parseLineItems,
+              sumItems: sumItems,
+              guessCategory: guessCategory,
+              findDate: findDate,
+              findTotal: findTotal, findSubtotal: findSubtotal,
+              findMerchant: findMerchant, findPayment: findPayment,
+              findChange: findChange,
+              amountsIn: amountsIn,
+              isDuplicateRecord: isDuplicateRecord,
+              snapshotRecords: snapshotRecords,
+              pushUndo: pushUndo, popUndo: popUndo };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  root.HKReceiptParser = api;
+})(typeof window !== "undefined" ? window : this);
+</script>
+<script>
+/* ES5 only — iOS 16 Safari safe. No data leaves the device. */
+var KEY = "hk-receipt-scan-v1";
+var records = [];
+try { records = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) { records = []; }
+/* OCR language data: first run downloads chi_tra+eng traineddata from the
+   CDN (about 15 MB, once); Tesseract.js then caches it in IndexedDB, and
+   the Service Worker (sw.js, https hosting only) caches the library
+   itself, so later scans work offline. To self-host the language packs
+   instead, put chi_tra.traineddata.gz and eng.traineddata.gz in vendor/
+   (see vendor/README.md) and set TESS_LANG_PATH to "./vendor/". */
+var TESS_LANG_PATH = null;
+/* Undo for delete / clear-all: snapshots live in memory only, so undo
+   works until the page is closed. */
+var undoStack = [];
+function updateUndoBtn() {
+  document.getElementById("undo").style.display = undoStack.length ? "" : "none";
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(records)); return true; }
+  catch (e) { return false; }
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function csvEsc(s) {
+  return '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+}
+function setStatus(t) { document.getElementById("status").textContent = t; }
+/* Pure summary helpers (no DOM): monthly + category totals from records. */
+function monthKey(d) { return String(d || "").slice(0, 7); }
+function monthlyTotals(recs) {
+  var out = {};
+  recs.forEach(function (r) {
+    var k = monthKey(r.date);
+    if (!/^\d{4}-\d{2}$/.test(k)) { k = "未有日期"; }
+    out[k] = Math.round(((out[k] || 0) + (r.total || 0)) * 100) / 100;
+  });
+  return out;
+}
+function categoryTotals(recs) {
+  var out = {};
+  recs.forEach(function (r) {
+    var c = r.category || "其他";
+    if (!out[c]) { out[c] = { total: 0, count: 0 }; }
+    out[c].total = Math.round((out[c].total + (r.total || 0)) * 100) / 100;
+    out[c].count++;
+  });
+  return out;
+}
+function renderSummary() {
+  var el = document.getElementById("summary");
+  if (!records.length) { el.innerHTML = '<p class="note">未有記錄。</p>'; return; }
+  var months = monthlyTotals(records);
+  var keys = Object.keys(months).sort();
+  var last6 = keys.slice(-6);
+  var maxM = 0, i;
+  last6.forEach(function (k) { if (months[k] > maxM) { maxM = months[k]; } });
+  var h = "<h3>最近月份 (HK$)</h3>";
+  last6.forEach(function (k) {
+    var pct = maxM ? Math.round(months[k] / maxM * 100) : 0;
+    h += '<div style="font-size:14px;margin:4px 0">' + esc(k) + ' $' + months[k].toFixed(2) +
+      '<div style="height:10px;background:#0b6fa4;border-radius:5px;width:' + pct + '%"></div></div>';
+  });
+  var cats = categoryTotals(records);
+  var ckeys = Object.keys(cats).sort(function (a, b) { return cats[b].total - cats[a].total; });
+  var grand = 0;
+  ckeys.forEach(function (k) { grand += cats[k].total; });
+  h += "<h3>類別 breakdown</h3>";
+  ckeys.forEach(function (k) {
+    var pct = grand ? Math.round(cats[k].total / grand * 100) : 0;
+    h += '<div style="font-size:14px;margin:4px 0">' + esc(k) + ' $' + cats[k].total.toFixed(2) +
+      ' (' + cats[k].count + '筆, ' + pct + '%)' +
+      '<div style="height:10px;background:#2e8b57;border-radius:5px;width:' + pct + '%"></div></div>';
+  });
+  var now = new Date();
+  var thisK = now.getFullYear() + "-" + ("0" + (now.getMonth() + 1)).slice(-2);
+  var thisTotal = months[thisK] || 0;
+  var days = now.getDate();
+  h += '<p class="note">本月至今 $' + thisTotal.toFixed(2) + ' (' + days + '日, 平均每日 $' +
+    (days ? (thisTotal / days).toFixed(2) : "0.00") + ')。共 ' + records.length + ' 筆, 合共 $' +
+    grand.toFixed(2) + '。</p>';
+  el.innerHTML = h;
+}
+function renderList() {
+  var html = "", total = 0;
+  records.forEach(function (r, idx) {
+    total += r.total || 0;
+    var itemsNote = (r.items && r.items.length) ?
+      ' <span style="color:#777;font-size:13px">(' + r.items.length + '項)</span>' : "";
+    var catNote = r.category ? ' <span style="color:#2e8b57;font-size:13px">' + esc(r.category) + '</span>' : "";
+    html += "<tr><td>" + esc(r.date || "") + "</td><td>" + esc(r.merchant || "") + catNote + itemsNote +
+      '</td><td class="num">$' + (r.total != null ? r.total.toFixed(2) : "—") + "</td>" +
+      '<td><button type="button" class="ghost" data-del="' + idx + '" style="padding:4px 8px;font-size:13px;margin:0">刪除</button></td></tr>';
+  });
+  document.getElementById("rows").innerHTML = html ||
+    '<tr><td colspan="4">未有記錄,影張單據開始。</td></tr>';
+  document.getElementById("sum").textContent =
+    records.length ? "(共 " + records.length + " 筆,合共 $" + total.toFixed(2) + ")" : "";
+  renderSummary();
+}
+function itemRowHTML(name, amount) {
+  return '<div class="item-row"><input class="item-name" value="' + esc(name || "") +
+    '" placeholder="項目名稱"><input class="item-amount" inputmode="decimal" value="' +
+    (amount != null ? amount.toFixed(2) : "") + '" placeholder="$">' +
+    '<button type="button" class="ghost item-del">✕</button></div>';
+}
+function renderItems(items) {
+  var html = "";
+  (items || []).forEach(function (it) { html += itemRowHTML(it.name, it.amount); });
+  document.getElementById("items").innerHTML = html;
+}
+function collectItems() {
+  var out = [];
+  var rows = document.getElementById("items").getElementsByClassName("item-row");
+  for (var i = 0; i < rows.length; i++) {
+    var name = rows[i].getElementsByClassName("item-name")[0].value.trim();
+    var amount = parseFloat(rows[i].getElementsByClassName("item-amount")[0].value);
+    if (!name) continue;
+    out.push({ name: name, amount: isNaN(amount) ? null : amount });
+  }
+  return out;
+}
+function showForm(merchant, date, total, items, ocrText, category, payment) {
+  document.getElementById("f-merchant").value = merchant || "";
+  document.getElementById("f-date").value = date || "";
+  document.getElementById("f-total").value = total != null ? total.toFixed(2) : "";
+  document.getElementById("f-category").value = category || "其他";
+  document.getElementById("f-payment").value = payment || "";
+  renderItems(items || []);
+  document.getElementById("ocr").textContent = ocrText || "";
+  document.getElementById("form").style.display = "block";
+  refreshItemCheck();
+}
+var currentImage = null;
+document.getElementById("file").addEventListener("change", function (e) {
+  var f = e.target.files && e.target.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    currentImage = reader.result;
+    var img = document.getElementById("preview");
+    img.src = currentImage; img.style.display = "block";
+    document.getElementById("scan").disabled = false;
+    setStatus("已載入相片,可以開始辨識。");
+  };
+  reader.readAsDataURL(f);
+});
+document.getElementById("manual").addEventListener("click", function () {
+  showForm("", "", null, [], "");
+  setStatus("人手輸入:填好商戶、日期、總數同項目,再㩒儲存。");
+});
+document.getElementById("add-item").addEventListener("click", function () {
+  document.getElementById("items").innerHTML += itemRowHTML("", null);
+});
+document.getElementById("rows").addEventListener("click", function (e) {
+  var t = e.target || e.srcElement;
+  if (!t || !t.getAttribute || t.getAttribute("data-del") === null) { return; }
+  var idx = parseInt(t.getAttribute("data-del"), 10);
+  if (isNaN(idx) || !records[idx]) { return; }
+  if (!confirm("刪除呢筆記錄（" + (records[idx].merchant || "未填商戶") + "，" +
+      (records[idx].date || "未填日期") + "）？")) { return; }
+  undoStack = HKReceiptParser.pushUndo(undoStack, records);
+  records.splice(idx, 1);
+  if (!save()) { setStatus("刪除咗，但儲存失敗：瀏覽器儲存空間可能滿咗。"); }
+  else { setStatus("已刪除。㩒「復原刪除」可以拎返。"); }
+  renderList();
+  updateUndoBtn();
+});
+/* Warn when the item lines do not add up to the total — a common OCR slip.
+   Runs when the form opens and live, as the user edits items or the total. */
+function refreshItemCheck() {
+  var el = document.getElementById("itemCheck");
+  if (!el) { return; }
+  var items = collectItems();
+  var total = parseFloat(document.getElementById("f-total").value);
+  if (!items.length || isNaN(total)) { el.style.display = "none"; el.textContent = ""; return; }
+  var sum = HKReceiptParser.sumItems(items);
+  var diff = Math.round((sum - total) * 100) / 100;
+  el.style.display = "block";
+  if (Math.abs(diff) < 0.01) {
+    el.textContent = "項目加埋 $" + sum.toFixed(2) + "，同總數一致。";
+  } else {
+    el.textContent = "留意：項目加埋 $" + sum.toFixed(2) + "，總數係 $" + total.toFixed(2) +
+      "（差 $" + Math.abs(diff).toFixed(2) + "）— 請核對項目或總數，可能有項目認錯咗。";
+  }
+}
+document.getElementById("form").addEventListener("input", refreshItemCheck);
+document.getElementById("items").addEventListener("click", function (e) {
+  var t = e.target || e.srcElement;
+  if (t && t.className && t.className.indexOf("item-del") !== -1) {
+    var row = t.parentNode;
+    if (row && row.parentNode) row.parentNode.removeChild(row);
+  }
+});
+document.getElementById("scan").addEventListener("click", function () {
+  var btn = document.getElementById("scan");
+  if (!currentImage) { setStatus("請先揀張單據相。"); return; }
+  if (!window.Tesseract) {
+    // CDN failed to load (offline / network blocked): say so plainly,
+    // and still let the user enter the receipt by hand.
+    showForm("", "", null, [], "");
+    setStatus("OCR 引擎載入失敗:未能由 CDN 載入 Tesseract.js,請檢查網絡連線再重新整理本頁。" +
+      "唔使等 — 下面表格可以直接人手輸入商戶、日期、總數同項目。");
+    return;
+  }
+  btn.disabled = true;
+  setStatus("載入辨識模型…(第一次要下載語言包,請稍候)");
+  var tessOpts = {
+    logger: function (m) {
+      var pct = (m.progress != null) ? Math.round(m.progress * 100) + "%" : "";
+      if (m.status === "recognizing text") {
+        setStatus("辨識緊文字…" + pct);
+      } else if (m.status) {
+        setStatus("載入辨識模型…" + pct);
+      }
+    }
+  };
+  if (TESS_LANG_PATH) { tessOpts.langPath = TESS_LANG_PATH; }
+  Tesseract.recognize(currentImage, "chi_tra+eng", tessOpts).then(function (res) {
+    btn.disabled = false;
+    showResult(res.data.text || "");
+  }, function (err) {
+    btn.disabled = false;
+    showForm("", "", null, [], "");
+    setStatus("辨識失敗:" + err + " 請檢查網絡再試,或直接人手輸入下面表格。");
+  });
+});
+function showResult(text) {
+  var r = HKReceiptParser.parseReceipt(text);
+  var items = HKReceiptParser.parseLineItems(r.lines);
+  showForm(r.merchant, r.date, r.total, items, text, r.category, r.payment);
+  setStatus("辨識完成,信心 " + Math.round(r.confidence * 100) + "% — 請核對後儲存。" +
+    (r.change != null ? " 找續 $" + r.change.toFixed(2) + "。" : ""));
+}
+var SAMPLE_RECEIPT = "PARKnSHOP\n百佳超級市場\n09/11/2026 18:32\n白米 5kg $72.80\n雞蛋 10隻 $23.00\n小計 Subtotal $95.80\n合共 TOTAL $95.80\n八達通 Octopus $100.00\n找續 Change $4.20\n多謝光臨 Thank You";
+document.getElementById("sample").addEventListener("click", function () {
+  showResult(SAMPLE_RECEIPT);
+  setStatus("範例單據 (百佳) 已載入 — 試下改總數再儲存,記錄會出現喺下面。");
+});
+document.getElementById("parsePaste").addEventListener("click", function () {
+  var t = document.getElementById("paste").value;
+  if (!t.trim()) { setStatus("請先貼上單據文字。"); return; }
+  showResult(t);
+});
+document.getElementById("save").addEventListener("click", function () {
+  var merchant = document.getElementById("f-merchant").value.trim();
+  var date = document.getElementById("f-date").value.trim();
+  var total = parseFloat(document.getElementById("f-total").value);
+  var items = collectItems();
+  if (!merchant && !date && isNaN(total) && !items.length) {
+    setStatus("未填任何嘢：請至少填商戶、日期、總數或一項貨品先儲存。");
+    return;
+  }
+  if (date) {
+    var parts = date.split("-");
+    var d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(d.getTime()) ||
+        d.getFullYear() !== parseInt(parts[0], 10) ||
+        d.getMonth() !== parseInt(parts[1], 10) - 1 ||
+        d.getDate() !== parseInt(parts[2], 10)) {
+      setStatus("日期唔啱：請用 YYYY-MM-DD（例如 2026-11-09），或者留空。2026-02-30 呢類唔存在嘅日子都唔得。");
+      return;
+    }
+  }
+  var rec = {
+    merchant: merchant,
+    date: date,
+    category: document.getElementById("f-category").value,
+    payment: document.getElementById("f-payment").value.trim(),
+    total: isNaN(total) ? null : total,
+    items: items,
+    saved_at: new Date().toISOString().slice(0, 10)
+  };
+  /* Same merchant + date + total as an existing record: probably a
+     double-save (e.g. tapped Save twice). Ask before storing it. */
+  if (HKReceiptParser.isDuplicateRecord(records, rec)) {
+    if (!confirm("呢筆同之前一筆好似一樣 (商戶、日期、總數相同),可能係重複儲存。\n㩒「確定」仍然儲存,㩒「取消」就唔存。")) { return; }
+  }
+  records.unshift(rec);
+  if (!save()) {
+    records.shift();
+    setStatus("儲存失敗：瀏覽器儲存空間可能滿咗，請刪走啲舊記錄再試。呢筆未儲存到。");
+    return;
+  }
+  renderList();
+  document.getElementById("form").style.display = "none";
+  setStatus("已儲存。");
+});
+document.getElementById("export").addEventListener("click", function () {
+  if (!records.length) { setStatus("未有記錄，冇嘢可以匯出。"); return; }
+  /* Leading BOM so Excel on Windows opens the Chinese text correctly. */
+  var csv = "\uFEFFdate,merchant,category,payment,total_hkd,items\n" + records.map(function (r) {
+    var items = (r.items || []).map(function (it) {
+      return it.name + (it.amount != null ? " $" + it.amount.toFixed(2) : "");
+    }).join("; ");
+    return [r.date || "", csvEsc(r.merchant || ""), csvEsc(r.category || ""),
+      csvEsc(r.payment || ""),
+      r.total != null ? r.total.toFixed(2) : "", csvEsc(items)].join(",");
+  }).join("\n");
+  var blob = new Blob([csv], { type: "text/csv" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "receipts-hk.csv"; a.click();
+});
+document.getElementById("clear").addEventListener("click", function () {
+  if (!records.length) { setStatus("未有記錄，冇嘢可以清空。"); return; }
+  if (confirm("清空全部 " + records.length + " 筆記錄?")) {
+    undoStack = HKReceiptParser.pushUndo(undoStack, records);
+    records = []; save(); renderList(); updateUndoBtn();
+    setStatus("已清空全部記錄。㩒「復原刪除」可以拎返。");
+  }
+});
+document.getElementById("undo").addEventListener("click", function () {
+  var u = HKReceiptParser.popUndo(undoStack);
+  if (!u) { updateUndoBtn(); return; }
+  undoStack = u.stack;
+  records = u.records;
+  if (!save()) { setStatus("復原咗，但儲存失敗：瀏覽器儲存空間可能滿咗。"); }
+  else { setStatus("已復原。"); }
+  renderList();
+  updateUndoBtn();
+});
+renderList();
+updateUndoBtn();
+/* Service Worker (sw.js): after the first visit over https (e.g. GitHub
+   Pages), the Tesseract.js library and the OCR language packs are cached
+   on the device, so later scans work offline. Does nothing on file:// —
+   a Service Worker needs http(s). If registration fails the page still
+   works online, and manual entry always works. */
+if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
+  try {
+    navigator.serviceWorker.register("sw.js").catch(function () {});
+  } catch (e) {}
+}
+</script>
+</body>
+</html>
